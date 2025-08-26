@@ -17,6 +17,30 @@
 #include <cstdarg>
 
 #define CTRL_KEY(k) ((k) & 0x1f)
+#define KILO_TAB_STOP 8
+
+// ============================================================================
+// ENUMS AND CONSTANTS
+// ============================================================================
+
+enum editorKey {
+  BACKSPACE = 127,
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  DEL_KEY,
+  HOME_KEY,
+  END_KEY,
+  PAGE_UP,
+  PAGE_DOWN
+};
+
+const int VERSION = 1;
+
+// ============================================================================
+// DATA STRUCTURES
+// ============================================================================
 
 class Abuf {
 private:
@@ -45,22 +69,10 @@ public:
   int size() const {
     return static_cast<int>(buffer.size());
   }
-  
+
   std::string str() const {
     return buffer;
   }
-};
-
-enum editorKey {
-  ARROW_LEFT = 1000,
-  ARROW_RIGHT,
-  ARROW_UP,
-  ARROW_DOWN,
-  DEL_KEY,
-  HOME_KEY,
-  END_KEY,
-  PAGE_UP,
-  PAGE_DOWN
 };
 
 struct erow {
@@ -71,7 +83,6 @@ struct erow {
   int rsize;
   std::string render;
 };
-
 
 struct editorConfig {
   int cx, cy;
@@ -85,9 +96,61 @@ struct editorConfig {
   std::string filename;  // Store the filename
   std::string statusmsg;  // Status message
   time_t statusmsg_time;  // Timestamp for status message
-  std::vector<erow> rows; 
+  std::vector<erow> rows;
   struct termios orig_terminos;
 } E;
+
+// ============================================================================
+// FUNCTION DECLARATIONS
+// ============================================================================
+
+// Terminal functions
+void die(const char *s);
+void disableRawMode();
+void enableRawMode();
+int getCursorPosition(int *rows, int *cols);
+int getWindowSize(int *rows, int *cols);
+
+// Input functions
+int editorReadKey();
+void editorProcessKeypress();
+void editorMoveCursor(int key);
+
+// Row operations
+int editorRowCxToRx(const erow &row, int cx);
+void editorUpdateRow(erow &row);
+void editorInsertRow(int at, const std::string& s);
+void editorRowAppendString(erow &row, const char* s, size_t len);
+void editorDelRow(int at);
+void editorRowInsertChar(erow &row, int at, char c);
+void editorInsertChar(int c);
+void editorInsertNewLine();
+void editorRowDelChar(erow &row, int at);
+void editorDelChar();
+
+// File operations
+std::string editorRowsToString();
+void editorOpen(const std::string& filename);
+void editorSave();
+
+// Display functions
+void editorScroll();
+void editorDrawRows(Abuf &ab);
+void editorDrawStatusBar(Abuf &ab);
+void editorDrawMessageBar(Abuf &ab);
+void editorRefreshScreen();
+
+// Utility functions
+std::string getFileExtension(const std::string& filename);
+std::string getBasename(const std::string& filepath);
+void editorSetStatusMessage(const char* fmt, ...);
+
+// Initialization
+void initEditor();
+
+// ============================================================================
+// TERMINAL FUNCTIONS
+// ============================================================================
 
 void die(const char *s) {
   write(STDOUT_FILENO, "\x1b[2J", 4);
@@ -101,18 +164,50 @@ void disableRawMode() {
 }
 
 void enableRawMode() {
-    if (tcgetattr(STDIN_FILENO, &E.orig_terminos) == -1) die("tcgetattr");
-    atexit(disableRawMode);
-    struct termios raw = E.orig_terminos;
-    raw.c_iflag &= ~(ICRNL | IXON | INPCK | BRKINT);
-    raw.c_cflag |= (CS8);
-    raw.c_oflag &= ~(OPOST);
-    raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
-    raw.c_cc[VMIN] = 0;
-    raw.c_cc[VTIME] = 1;
+  if (tcgetattr(STDIN_FILENO, &E.orig_terminos) == -1) die("tcgetattr");
+  atexit(disableRawMode);
+  struct termios raw = E.orig_terminos;
+  raw.c_iflag &= ~(ICRNL | IXON | INPCK | BRKINT);
+  raw.c_cflag |= (CS8);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_lflag &= ~(ECHO | ICANON | ISIG | IEXTEN);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 1;
 
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
 }
+
+int getCursorPosition(int *rows, int *cols) {
+  char buf[32];
+  unsigned int i = 0;
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+  while (i < sizeof(buf) - 1) {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
+    if (buf[i] == 'R') break;
+    i++;
+  }
+  buf[i] = '\0'; // Null terminate
+  if (buf[0] != '\x1b' || buf[1] != '[') return -1;
+  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
+  return 0;
+}
+
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+    return getCursorPosition(rows, cols);
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
+// ============================================================================
+// INPUT FUNCTIONS
+// ============================================================================
 
 int editorReadKey() {
   int nread;
@@ -160,100 +255,6 @@ int editorReadKey() {
   }
 }
 
-int getCursorPosition(int *rows, int *cols) {
-  char buf[32];
-  unsigned int i = 0;
-  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
-  while (i < sizeof(buf) - 1) {
-    if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
-    if (buf[i] == 'R') break;
-    i++;
-  }
-  buf[i] = '\0'; // Null terminate
-  if (buf[0] != '\x1b' || buf[1] != '[') return -1;
-  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
-  return 0;
-}
-
-int getWindowSize(int *rows, int *cols) {
-  struct winsize ws;
-
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
-    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
-    return getCursorPosition(rows, cols);
-  } else {
-    *cols = ws.ws_col;
-    *rows = ws.ws_row;
-    return 0;
-  }
-}
-
-
-
-
-#define KILO_TAB_STOP 8
-int editorRowCxToRx(const erow &row, int cx) {
-    int rx = 0;
-    for (int j = 0; j < cx; j++) {
-        if (row.chars[j] == '\t') {
-            rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
-        }
-        rx++;
-    }
-    return rx;
-}
-
-
-
-void editorUpdateRow(erow &row) {
-    std::string result;
-    result.reserve(row.chars.size()); // may expand more if tabs
-
-    for (char c : row.chars) {
-        if (c == '\t') {
-            // insert at least one space
-            result.push_back(' ');
-            // then pad until we reach next tab stop
-            while (result.size() % KILO_TAB_STOP != 0) {
-                result.push_back(' ');
-            }
-        } else {
-            result.push_back(c);
-        }
-    }
-
-    row.render = std::move(result);
-    row.rsize = static_cast<int>(row.render.size());
-}
-
-
-void editorAppendRow(const std::string& s) {
-    erow row;
-    row.chars = s;
-    editorUpdateRow(row);
-    E.rows.push_back(std::move(row));
-    E.numrows = static_cast<int>(E.rows.size()); // optional
-}
-
-
-void editorOpen(const std::string& filename) {
-    E.filename = filename;  // Store the filename
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        die("fopen");
-    }
-
-    E.rows.clear();
-    std::string line;
-    while (std::getline(file, line)) {
-        if (!line.empty() && line.back() == '\r') {
-            line.pop_back();
-        }
-        editorAppendRow(line);
-    }
-    E.dirty = 0;  // File is not dirty when first opened
-}
-
 void editorMoveCursor(int key) {
   switch (key) {
     case ARROW_LEFT:
@@ -268,7 +269,7 @@ void editorMoveCursor(int key) {
 
     case ARROW_RIGHT: {
       if (E.cy < E.numrows) {
-        int rowlen = E.rows[E.cy].size();
+        int rowlen = (E.cy < static_cast<int>(E.rows.size())) ? E.rows[E.cy].size() : 0;
         if (E.cx < rowlen) {
           E.cx++;
         } else if (E.cx == rowlen && E.cy + 1 < E.numrows) {
@@ -293,7 +294,7 @@ void editorMoveCursor(int key) {
   }
 
   // Clamp cx to current row length
-  int rowlen = (E.cy < E.numrows) ? E.rows[E.cy].size() : 0;
+  int rowlen = (E.cy < E.numrows && E.cy < static_cast<int>(E.rows.size())) ? E.rows[E.cy].size() : 0;
   if (E.cx > rowlen) {
     E.cx = rowlen;
   }
@@ -302,18 +303,32 @@ void editorMoveCursor(int key) {
 void editorProcessKeypress() {
   int c = editorReadKey();
   switch (c) {
+    case '\r':
+      editorInsertNewLine();
+      break;
     case CTRL_KEY('q'):
       write(STDOUT_FILENO, "\x1b[2J", 4);
       write(STDOUT_FILENO, "\x1b[H", 3);
       exit(0);
       break;
+
+    case CTRL_KEY('s'):
+      editorSave();
+      break;
+
     case HOME_KEY:
       E.cx = 0;
       break;
     case END_KEY:
-      if (E.cy < E.numrows) {
+      if (E.cy < E.numrows && E.cy < static_cast<int>(E.rows.size())) {
         E.cx = E.rows[E.cy].size();
       }
+      break;
+    case BACKSPACE:
+    case CTRL_KEY('h'):
+    case DEL_KEY:
+      if (c == DEL_KEY) editorMoveCursor(ARROW_RIGHT);
+      editorDelChar();
       break;
     case PAGE_UP:
     case PAGE_DOWN:
@@ -324,7 +339,7 @@ void editorProcessKeypress() {
           E.cy = E.rowoff + E.screenrows - 1;
           if (E.cy > E.numrows) E.cy = E.numrows;
         }
-        
+
         int times = E.screenrows;
         while (times--)
           editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
@@ -336,15 +351,256 @@ void editorProcessKeypress() {
     case ARROW_RIGHT:
       editorMoveCursor(c);
       break;
+
+    case CTRL_KEY('l'):
+    case '\x1b':
+      break;
+    default:
+      editorInsertChar(c);
+      break;
   }
 }
+
+// ============================================================================
+// ROW OPERATIONS
+// ============================================================================
+
+int editorRowCxToRx(const erow &row, int cx) {
+  int rx = 0;
+  for (int j = 0; j < cx && j < static_cast<int>(row.chars.size()); j++) {
+    if (row.chars[j] == '\t') {
+      rx += (KILO_TAB_STOP - 1) - (rx % KILO_TAB_STOP);
+    }
+    rx++;
+  }
+  return rx;
+}
+
+void editorUpdateRow(erow &row) {
+  std::string result;
+  result.reserve(row.chars.size()); // may expand more if tabs
+
+  for (char c : row.chars) {
+    if (c == '\t') {
+      // insert at least one space
+      result.push_back(' ');
+      // then pad until we reach next tab stop
+      while (result.size() % KILO_TAB_STOP != 0) {
+        result.push_back(' ');
+      }
+    } else {
+      result.push_back(c);
+    }
+  }
+
+  row.render = std::move(result);
+  row.rsize = static_cast<int>(row.render.size());
+}
+
+void editorInsertRow(int at, const std::string& s) {
+  if (at < 0 || at > E.numrows) return;
+
+  erow row;
+  row.chars = s;
+  editorUpdateRow(row);
+
+  E.rows.insert(E.rows.begin() + at, std::move(row));
+  E.numrows = static_cast<int>(E.rows.size());
+  E.dirty++;
+}
+
+void editorDelRow(int at) {
+  if (at < 0 || at >= E.numrows || at >= static_cast<int>(E.rows.size())) return;
+  E.rows.erase(E.rows.begin() + at);
+  E.numrows = static_cast<int>(E.rows.size());
+  E.dirty++;
+}
+
+void editorRowInsertChar(erow &row, int at, char c) {
+  if (at < 0 || at > static_cast<int>(row.chars.size())) at = row.chars.size();
+  row.chars.insert(row.chars.begin() + at, c);
+  editorUpdateRow(row);
+  E.dirty++;
+}
+
+void editorRowAppendString(erow &row, const char* s, size_t len) {
+  row.chars.append(s, len);
+  editorUpdateRow(row);
+  E.dirty++;
+}
+
+void editorInsertChar(int c) {
+  if (E.cy == E.numrows) {
+    editorInsertRow(E.rows.size(), "");
+  }
+  if (E.cy >= static_cast<int>(E.rows.size())) return;
+  
+  editorRowInsertChar(E.rows[E.cy], E.cx, static_cast<char>(c));
+  E.cx++;
+}
+
+void editorInsertNewLine() {
+  if (E.cy >= E.numrows) {
+    editorInsertRow(E.cy, "");
+  } else if (E.cy < static_cast<int>(E.rows.size())) {
+    erow &row = E.rows[E.cy];
+    if (E.cx == 0) {
+      editorInsertRow(E.cy, "");
+    } else {
+      std::string newRowContent = (E.cx < static_cast<int>(row.chars.size())) 
+        ? row.chars.substr(E.cx) : "";
+      editorInsertRow(E.cy + 1, newRowContent);
+      
+      if (E.cx < static_cast<int>(row.chars.size())) {
+        row.chars.resize(E.cx);
+        editorUpdateRow(row);
+      }
+    }
+  }
+  E.cy++;
+  E.cx = 0;
+}
+
+void editorRowDelChar(erow &row, int at) {
+  if (at < 0 || at >= static_cast<int>(row.chars.size())) return; 
+  
+  row.chars.erase(row.chars.begin() + at);
+  editorUpdateRow(row);
+  E.dirty++;
+}
+
+void editorDelChar() {
+  // Boundary checks
+  if (E.cy >= static_cast<int>(E.rows.size())) return; 
+  if (E.cx == 0 && E.cy == 0) return; 
+  if (E.cy < 0) return;
+
+  if (E.cx > 0) {
+    // Delete character in current row
+    if (E.cy < static_cast<int>(E.rows.size())) {
+      erow &row = E.rows[E.cy];
+      editorRowDelChar(row, E.cx - 1);
+      E.cx--;
+    }
+  } else {
+    // Merge current row with previous row
+    if (E.cy > 0 && E.cy - 1 < static_cast<int>(E.rows.size()) && E.cy < static_cast<int>(E.rows.size())) {
+      erow &prevRow = E.rows[E.cy - 1];
+      erow &row = E.rows[E.cy];
+      E.cx = static_cast<int>(prevRow.chars.size());
+      editorRowAppendString(prevRow, row.chars.c_str(), row.chars.size());
+      editorDelRow(E.cy);
+      E.cy--;
+    }
+  }
+}
+
+// ============================================================================
+// FILE OPERATIONS
+// ============================================================================
+
+std::string editorRowsToString() {
+  std::string buf;
+  buf.reserve([] {
+    size_t totlen = 0;
+    for (const auto& row : E.rows)
+      totlen += row.size() + 1; // +1 for newline
+    return totlen;
+  }());
+
+  for (const auto& row : E.rows) {
+    buf.append(row.chars);
+    buf.push_back('\n');
+  }
+
+  return buf;
+}
+
+void editorOpen(const std::string& filename) {
+  E.filename = filename;  // Store the filename
+  std::ifstream file(filename);
+  if (!file.is_open()) {
+    die("fopen");
+  }
+
+  E.rows.clear();
+  E.numrows = 0;
+  std::string line;
+  while (std::getline(file, line)) {
+    if (!line.empty() && line.back() == '\r') {
+      line.pop_back();
+    }
+    editorInsertRow(E.rows.size(), line);
+  }
+  E.dirty = 0;  // File is not dirty when first opened
+}
+
+void editorSave() {
+  if (E.filename.empty()) return;
+
+  std::string buf = editorRowsToString();
+
+  std::ofstream ofs(E.filename, std::ios::out | std::ios::trunc | std::ios::binary);
+  if (ofs) {
+    ofs.write(buf.data(), buf.size());
+    if (ofs) {
+      editorSetStatusMessage("%d bytes written to disk", static_cast<int>(buf.size()));
+      E.dirty = 0;  // Mark as not dirty after successful save
+    } else {
+      editorSetStatusMessage("Can't save! I/O error");
+    }
+  } else {
+    editorSetStatusMessage("Can't save! Failed to open file");
+  }
+}
+
+// ============================================================================
+// UTILITY FUNCTIONS
+// ============================================================================
+
+std::string getFileExtension(const std::string& filename) {
+  size_t dot = filename.find_last_of('.');
+  if (dot != std::string::npos && dot != filename.length() - 1) {
+    return filename.substr(dot + 1);
+  }
+  return "";
+}
+
+std::string getBasename(const std::string& filepath) {
+  size_t slash = filepath.find_last_of("/\\");
+  if (slash != std::string::npos) {
+    return filepath.substr(slash + 1);
+  }
+  return filepath;
+}
+
+void editorSetStatusMessage(const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+
+  char buffer[1024];
+  vsnprintf(buffer, sizeof(buffer), fmt, ap);
+  va_end(ap);
+
+  E.statusmsg = std::string(buffer);
+  E.statusmsg_time = time(nullptr);
+}
+
+// ============================================================================
+// DISPLAY FUNCTIONS
+// ============================================================================
 
 void editorScroll() {
   // Clamp vertical scroll
   E.rx = 0;
   if (E.cy < static_cast<int>(E.rows.size())) {
-  E.rx = editorRowCxToRx(E.rows[E.cy], E.cx);
-} if (E.cy >= E.rowoff + E.screenrows) {
+    E.rx = editorRowCxToRx(E.rows[E.cy], E.cx);
+  }
+
+  if (E.cy < E.rowoff) {
+    E.rowoff = E.cy;
+  }
+  if (E.cy >= E.rowoff + E.screenrows) {
     E.rowoff = E.cy - E.screenrows + 1;
   }
 
@@ -357,94 +613,62 @@ void editorScroll() {
   }
 }
 
-const int VERSION = 1;
-
 void editorDrawRows(Abuf &ab) {
-    for (int y = 0; y < E.screenrows; y++) {
-        int filerow = y + E.rowoff;
+  for (int y = 0; y < E.screenrows; y++) {
+    int filerow = y + E.rowoff;
 
-        if (filerow >= static_cast<int>(E.rows.size())) {
-            // Empty row
-            if (E.rows.empty() && y == E.screenrows / 3) {
-                std::ostringstream oss;
-                oss << "TUI text editor -- version " << VERSION;
-                std::string welcome = oss.str();
-                if ((int)welcome.size() > E.screencols) {
-                    welcome.resize(E.screencols);
-                }
-
-                int padding = (E.screencols - welcome.size()) / 2;
-                if (padding) {
-                    ab.append("~", 1);
-                    padding--;
-                }
-                while (padding-- > 0) ab.append(" ", 1);
-
-                ab.append(welcome.data(), welcome.size());
-            } else {
-                ab.append("~", 1);
-            }
-        } else {
-            // Draw file row
-            erow &row = E.rows[filerow];
-            int len = row.rsize - E.coloff;
-            if (len < 0) len = 0;
-            if (len > E.screencols) len = E.screencols;
-
-            if (len > 0) {
-                ab.append(row.render.data() + E.coloff, len);
-            }
+    if (filerow >= static_cast<int>(E.rows.size())) {
+      // Empty row
+      if (E.rows.empty() && y == E.screenrows / 3) {
+        std::ostringstream oss;
+        oss << "TUI text editor -- version " << VERSION;
+        std::string welcome = oss.str();
+        if (static_cast<int>(welcome.size()) > E.screencols) {
+          welcome.resize(E.screencols);
         }
 
-        ab.append("\x1b[K", 3); // clear line
-        ab.append("\r\n", 2);
-    }
-}
+        int padding = (E.screencols - static_cast<int>(welcome.size())) / 2;
+        if (padding) {
+          ab.append("~", 1);
+          padding--;
+        }
+        while (padding-- > 0) ab.append(" ", 1);
 
-// Helper function to get file extension for filetype detection
-std::string getFileExtension(const std::string& filename) {
-    size_t dot = filename.find_last_of('.');
-    if (dot != std::string::npos && dot != filename.length() - 1) {
-        return filename.substr(dot + 1);
-    }
-    return "";
-}
+        ab.append(welcome.data(), welcome.size());
+      } else {
+        ab.append("~", 1);
+      }
+    } else {
+      // Draw file row
+      erow &row = E.rows[filerow];
+      int len = row.rsize - E.coloff;
+      if (len < 0) len = 0;
+      if (len > E.screencols) len = E.screencols;
 
-// Helper function to get just the filename without path
-std::string getBasename(const std::string& filepath) {
-    size_t slash = filepath.find_last_of("/\\");
-    if (slash != std::string::npos) {
-        return filepath.substr(slash + 1);
+      if (len > 0) {
+        ab.append(row.render.data() + E.coloff, len);
+      }
     }
-    return filepath;
-}
 
-void editorSetStatusMessage(const char* fmt, ...) {
-    va_list ap;
-    va_start(ap, fmt);
-    
-    char buffer[1024];
-    vsnprintf(buffer, sizeof(buffer), fmt, ap);
-    va_end(ap);
-    
-    E.statusmsg = std::string(buffer);
-    E.statusmsg_time = time(nullptr);
+    ab.append("\x1b[K", 3); // clear line
+    ab.append("\r\n", 2);
+  }
 }
 
 void editorDrawStatusBar(Abuf &ab) {
   ab.append("\x1b[7m", 4);  // Switch to inverted colors
-  
+
   // Left side: filename, modification indicator, line count
   std::ostringstream left_status;
   std::string display_name = E.filename.empty() ? "[No Name]" : getBasename(E.filename);
   left_status << display_name;
-  
+
   if (E.dirty) {
     left_status << " (modified)";
   }
-  
+
   left_status << " - " << E.numrows << " lines";
-  
+
   // Right side: filetype, current line/total lines
   std::ostringstream right_status;
   std::string filetype = "no ft";
@@ -454,22 +678,22 @@ void editorDrawStatusBar(Abuf &ab) {
       filetype = ext;
     }
   }
-  
+
   right_status << filetype << " | " << (E.cy + 1) << "/" << E.numrows;
-  
+
   std::string left_str = left_status.str();
   std::string right_str = right_status.str();
-  
+
   // Truncate left side if too long
-  int len = left_str.length();
+  int len = static_cast<int>(left_str.length());
   if (len > E.screencols) {
     left_str.resize(E.screencols);
     len = E.screencols;
   }
   ab.append(left_str.data(), len);
-  
+
   // Add spaces and right-align the right side
-  int right_len = right_str.length();
+  int right_len = static_cast<int>(right_str.length());
   while (len < E.screencols) {
     if (E.screencols - len == right_len) {
       ab.append(right_str.data(), right_len);
@@ -479,17 +703,17 @@ void editorDrawStatusBar(Abuf &ab) {
       len++;
     }
   }
-  
+
   ab.append("\x1b[m", 3);  // Switch back to normal colors
   ab.append("\r\n", 2);
 }
 
 void editorDrawMessageBar(Abuf &ab) {
   ab.append("\x1b[K", 3);  // Clear the line
-  
-  int msglen = E.statusmsg.length();
+
+  int msglen = static_cast<int>(E.statusmsg.length());
   if (msglen > E.screencols) msglen = E.screencols;
-  
+
   // Display message only if it's less than 5 seconds old
   if (msglen && time(nullptr) - E.statusmsg_time < 5) {
     ab.append(E.statusmsg.data(), msglen);
@@ -501,7 +725,7 @@ void editorRefreshScreen() {
   Abuf ab;
   ab.append("\x1b[?25l", 6);  // Hide cursor
   ab.append("\x1b[H", 3);     // Position cursor at top-left
-  
+
   editorDrawRows(ab);
   editorDrawStatusBar(ab);
   editorDrawMessageBar(ab);
@@ -517,18 +741,28 @@ void editorRefreshScreen() {
   write(STDOUT_FILENO, ab.data(), ab.size());
 }
 
+// ============================================================================
+// INITIALIZATION
+// ============================================================================
+
 void initEditor() {
   E.cx = 0;
   E.cy = 0;
   E.rx = 0;
   E.rowoff = 0;
-  E.coloff = 0; 
+  E.coloff = 0;
   E.numrows = 0;
   E.dirty = 0;  // Initialize dirty flag
   E.filename = "";  // Initialize filename
+  E.statusmsg = "";
+  E.statusmsg_time = 0;
   if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
-  E.screenrows -= 2;  // Reserve space for status bar
+  E.screenrows -= 2;  // Reserve space for status bar and message bar
 }
+
+// ============================================================================
+// MAIN
+// ============================================================================
 
 int main(int argc, char *argv[]) {
   enableRawMode();
@@ -537,7 +771,7 @@ int main(int argc, char *argv[]) {
   if (argc >= 2) {
     editorOpen(argv[1]);
   }
-  editorSetStatusMessage("HELP: Ctrl-Q = quit"); 
+  editorSetStatusMessage("HELP: Ctrl-Q = quit | Ctrl-S = save");
   while (1) {
     editorRefreshScreen();
     editorProcessKeypress();
